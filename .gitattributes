@@ -1,0 +1,2 @@
+# 保证 Linux shell 脚本永远是 LF 换行（CRLF 会让 shebang 变成 /usr/bin/env bash\r 导致启动失败）
+*.sh text eol=lf
