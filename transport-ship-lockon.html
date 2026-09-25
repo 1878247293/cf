@@ -5092,7 +5092,7 @@ float fbm6(vec2 p){ float s=0., a=.5; for(int i=0;i<6;i++){ s+=a*vnoise(p); p=p*
         <div class="opt"><div class="lab">\u97F3\u91CF</div><div class="slider" data-k="vol"><input type="range" min="0" max="1" step="0.05"><span></span></div></div>
       </div>
       <button class="go" id="btnStart">\u5F00 \u59CB \u6E38 \u620F</button><button class="go" id="btnMulti" style="margin-top:10px;background:#2f6fb3">\u8054\u673A\u5BF9\u6218</button>
-      <div class="note">\u70B9\u51FB\u5F00\u59CB\u540E\u9F20\u6807\u5C06\u88AB\u9501\u5B9A\uFF0C\u6309 Esc \u6682\u505C\u3002\u753B\u8D28\u5207\u6362\u4F1A\u91CD\u65B0\u52A0\u8F7D\u9875\u9762\u3002 按 L 开关锁头辅助，准星靠近可见敌人后自动锁定头部。持步枪/冲锋枪/手枪时按住右键开镜，散布更小、移动更慢。按 Ctrl 滑铲（有冷却），按 V 向前喷气冲刺（可空中使用）。按 G 在脚下架设虎蹲炮，朝准星方向抛射 6 发炮弹覆盖落点（冷却 20 秒，注意别站在自己落点里）。</div>
+      <div class="note">\u70B9\u51FB\u5F00\u59CB\u540E\u9F20\u6807\u5C06\u88AB\u9501\u5B9A\uFF0C\u6309 Esc \u6682\u505C\u3002\u753B\u8D28\u5207\u6362\u4F1A\u91CD\u65B0\u52A0\u8F7D\u9875\u9762\u3002 持步枪/冲锋枪/手枪时按住右键开镜，散布更小、移动更慢。按 Ctrl 滑铲（有冷却），按 V 向前喷气冲刺（可空中使用）。按 G 在脚下架设虎蹲炮，朝准星方向抛射 6 发炮弹覆盖落点（冷却 20 秒，注意别站在自己落点里）。</div>
       <div class="mlinks"><a href="https://github.com/riba2534/claude-opus-5-5-demo" target="_blank" rel="noopener noreferrer">GitHub \u6E90\u7801</a><span>\xB7</span><a href="https://x.com/riba2534" target="_blank" rel="noopener noreferrer">X @riba2534</a></div>
     </div>
   </div>
@@ -5152,8 +5152,7 @@ applyLockAim(player) {
         status.style.cssText = "position:fixed;top:86px;left:50%;transform:translateX(-50%);z-index:100;pointer-events:none;color:#ffe082;background:#111b;padding:7px 14px;border-radius:6px;font:13px sans-serif;max-width:96vw;text-align:center";
         document.body.appendChild(status);
     }
-    status.textContent = "L 锁头：" + (player.lockAim ? (head ? "已锁定" : "开启 / 等待目标") : "关闭")
-        + "  ｜  右键开镜：" + (player.ads ? "开" : "关")
+    status.textContent = "右键开镜：" + (player.ads ? "开" : "关")
         + "  ｜  Ctrl 滑铲：" + (player.slideCD > 0 ? player.slideCD.toFixed(1) + "s" : "就绪")
         + "  ｜  V 喷气：" + (player.jetCD > 0 ? player.jetCD.toFixed(1) + "s" : "就绪")
         + "  ｜  G 虎蹲炮：" + (player.cannonCD > 0 ? player.cannonCD.toFixed(1) + "s" : "就绪");

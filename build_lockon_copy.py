@@ -208,8 +208,7 @@ applyLockAim(player) {
         status.style.cssText = "position:fixed;top:86px;left:50%;transform:translateX(-50%);z-index:100;pointer-events:none;color:#ffe082;background:#111b;padding:7px 14px;border-radius:6px;font:13px sans-serif;max-width:96vw;text-align:center";
         document.body.appendChild(status);
     }
-    status.textContent = "L 锁头：" + (player.lockAim ? (head ? "已锁定" : "开启 / 等待目标") : "关闭")
-        + "  ｜  右键开镜：" + (player.ads ? "开" : "关")
+    status.textContent = "右键开镜：" + (player.ads ? "开" : "关")
         + "  ｜  Ctrl 滑铲：" + (player.slideCD > 0 ? player.slideCD.toFixed(1) + "s" : "就绪")
         + "  ｜  V 喷气：" + (player.jetCD > 0 ? player.jetCD.toFixed(1) + "s" : "就绪")
         + "  ｜  G 虎蹲炮：" + (player.cannonCD > 0 ? player.cannonCD.toFixed(1) + "s" : "就绪");
@@ -949,7 +948,7 @@ html = html.replace(old_trace, lock_method + skill_method + cannon_method + net_
 hint = "点击开始后鼠标将被锁定，按 Esc 暂停。画质切换会重新加载页面。".encode("unicode_escape").decode("ascii")
 hint = re.sub(r"\\u([0-9a-f]{4})", lambda m: "\\u" + m[1].upper(), hint)
 assert hint in html
-html = html.replace(hint, hint + " 按 L 开关锁头辅助，准星靠近可见敌人后自动锁定头部。持步枪/冲锋枪/手枪时按住右键开镜，散布更小、移动更慢。按 Ctrl 滑铲（有冷却），按 V 向前喷气冲刺（可空中使用）。按 G 在脚下架设虎蹲炮，朝准星方向抛射 6 发炮弹覆盖落点（冷却 20 秒，注意别站在自己落点里）。", 1)
+html = html.replace(hint, hint + " 持步枪/冲锋枪/手枪时按住右键开镜，散布更小、移动更慢。按 Ctrl 滑铲（有冷却），按 V 向前喷气冲刺（可空中使用）。按 G 在脚下架设虎蹲炮，朝准星方向抛射 6 发炮弹覆盖落点（冷却 20 秒，注意别站在自己落点里）。", 1)
 
 target.write_text(html, encoding="utf-8")
 print(target)
