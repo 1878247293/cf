@@ -427,12 +427,22 @@ netConnect() {
     ws.onmessage = (e) => { try { this.onNetMsg(JSON.parse(e.data)); } catch (err) {} };
     ws.onclose = () => { this._ws = null; };
     ws.onerror = () => {};
-    if (!this._grabWired) { // F1 抢房主：仅大厅可抢（对局进行中禁用，避免中途接管使 bot 冻结）
+    if (!this._grabWired) { // F1 抢房主（无限制，随时可抢）；F2 房主在大厅终止正在进行的对局
         this._grabWired = true;
         window.addEventListener("keydown", (ev) => {
             if (ev.code === "F1" && this.mp) {
                 ev.preventDefault();
-                if (!this.isHost && this.roomState !== "playing") this.netSend({ t: "grabhost" });
+                // 抢房主无限制；若我此刻在大厅（没进战场）则连带终止正在进行的对局，把大家拉回大厅
+                if (!this.isHost) this.netSend({ t: "grabhost", end: !this.playing });
+            } else if (ev.code === "F2" && this.mp) {
+                ev.preventDefault();
+                // 房主在大厅等待（自己没进战场）且前面有对局在跑 → 一键终止那局，全体回大厅
+                if (this.isHost && !this.playing && this.roomState === "playing") {
+                    this.netSend({ t: "end" });
+                    this.roomState = "lobby"; this.pendingStart = null;
+                    if (this.hud && this.hud.toast) this.hud.toast("已终止当前对局", 1.5);
+                    this.renderLobby();
+                }
             }
         });
     }
@@ -455,11 +465,11 @@ onNetMsg(m) {
         this.renderLobby();
         return;
     }
-    if (m.t === "host") { // 房主变更（顺延 / F1 抢夺）：带 slot 时据 netId 判定，兼容旧无 slot 广播
+    if (m.t === "host") { // 房主变更（顺延 / F1 抢夺）：据 netId 判定；对局中切换要收编 / 交还 bot 以免冻结
         let was = this.isHost;
         this.isHost = (m.slot == null) ? true : (m.slot === this.netId);
-        if (this.isHost && !was && this.hud && this.hud.toast) this.hud.toast("你已成为房主", 1.5);
-        else if (!this.isHost && was && this.hud && this.hud.toast) this.hud.toast("房主已被接管", 1.5);
+        if (this.isHost && !was) { if (this.hud && this.hud.toast) this.hud.toast("你已成为房主", 1.5); if (this.playing) this.adoptBots(); }
+        else if (!this.isHost && was) { if (this.hud && this.hud.toast) this.hud.toast("房主已被接管", 1.5); if (this.playing) this.releaseBots(); }
         this.renderLobby(); return;
     }
     if (m.t === "roster") { this.netRoster = m.players; this.renderLobby(); return; }
@@ -475,11 +485,13 @@ onNetMsg(m) {
     }
     if (m.t === "leave") { this.removeRemote(m.slot); this.renderLobby(); return; }
     if (m.t === "score" && this.score) { this.score.BL = m.BL; this.score.GR = m.GR; return; }
+    if (m.t === "stats") { this.netStats = m.stats || {}; this.applyNetStats(this.netStats); return; }
+    if (m.t === "botsassign") { if (this.isHost && this.playing) this.adoptBots(); return; }
     if (!this.playing) return;
-    if (m.t === "state") this.applyNetState(m);
+    if (m.t === "state" || m.t === "world") this.applyNetState(m);
     else if (m.t === "fire") this.netShowFire(m);
     else if (m.t === "hit") this.netTakeHit(m);
-    else if (m.t === "kill") this.netShowKill(m);
+    else if (m.t === "frag") this.netShowKill(m);
 }
 netMine() {
     let out = [];
@@ -500,8 +512,9 @@ netUpdate(t) {
     for (let a of mine) {
         if (a._wa === undefined) a._wa = a.alive;
         if (a._wa && !a.alive) {
+            if (a === this.player) this.dmgFlash = 0; // 清掉致命弹幕累积的红闪，避免死亡瞬间连闪
             let k = a.lastAttacker;
-            this.netSend({ t: "kill", killer: k && k.netId ? k.netId : 0, killerName: k ? k.name : "",
+            this.netSend({ t: "frag", killer: k && k.netId ? k.netId : 0, killerName: k ? k.name : "",
                 killerTeam: k && k.team ? k.team : null, victim: a.netId, victimName: a.name, victimTeam: a.team,
                 w: a._lastW || (a.weapon ? a.weapon.def.id : "ak47"), hs: a._lastN === "head",
                 team: k && k.team ? k.team : null });
@@ -521,8 +534,8 @@ netUpdate(t) {
     this.netAcc += t;
     if (this.netAcc >= .05) {
         this.netAcc = 0;
-        // 优化：只发「变化过」的实体（静止/死亡的 bot 不再每 tick 重发），并每 ~1s 发一次全量关键帧
-        // （给新热加入者做初始状态 + 漂移校正）。功能不变，大幅削减中继与客户端负载。
+        if (this.netStats) this.applyNetStats(this.netStats); // 权威 stats 重写，覆盖晚创建的远程化身
+        // 优化：只发「变化过」的实体（静止/死亡的 bot 不再每 tick 重发）；服务器再聚合成 world 按 tick 下发。
         this._kf = (this._kf || 0) + 1;
         let keyframe = this._kf % 20 === 0;
         let ents = [];
@@ -545,7 +558,17 @@ applyNetState(m) {
     if (!m.ents || !this.playing) return;
     for (let s of m.ents) {
         if (s.id === this.netId) continue;
-        if (this.isHost && s.id >= 1000) continue;
+        if (s.id >= 1000) {
+            let owned = null;
+            for (let q of this.actors) if (q.netId === s.id && q instanceof Fa && !q.isRemote) { owned = q; break; }
+            if (owned) continue;               // 我正在模拟这个 bot，忽略服务器回显
+            if (this.isHost) {                 // 我是房主却还没接管它 → 收编为本地 bot 续算（补齐迁移遗漏）
+                let rav = this.remotes[s.id];
+                if (!rav) rav = this.addRemote(s);
+                if (rav) { rav.isRemote = !1; delete this.remotes[s.id]; }
+                continue;
+            }
+        }
         let av = this.remotes[s.id];
         if (!av) av = this.addRemote(s);
         if (!av) continue;
@@ -553,7 +576,7 @@ applyNetState(m) {
         av.speed = s.sp; av.crouch = !!s.cr; av.onGround = !!s.og; av.pitch = s.pitch;
         let wasAlive = av.alive;
         av.alive = !!s.al; av.hp = s.hp; av.protectT = 0;
-        if (av.alive && !wasAlive) { av.deadT = 0; if (av.soldier && av.soldier.reset) { try { av.soldier.reset(); } catch (e) {} } }
+        if (av.alive && !wasAlive) { av.deadT = 0; av._pk = 0; av._ph = null; if (av.soldier && av.soldier.reset) { try { av.soldier.reset(); } catch (e) {} } }
         else if (!av.alive && wasAlive && av.soldier && av.soldier.die) { try { av.soldier.die(av.pos.x, av.pos.z, "chest"); } catch (e) {} }
         // 兜底：快照说活着但 soldier 还卡在死亡趴地姿势（滑铲后死亡再生、丢包错序等）→ 强制起身。
         // 远程化身永远不走 spawnActor→spawn→soldier.reset()，只能在这里手动复位，否则永久躺地。
@@ -614,14 +637,63 @@ netTakeHit(m) {
         pos: m.pos ? new R(m.pos.x, m.pos.y, m.pos.z) : victim.pos.clone() };
     try { this.damage(victim, atk, m.dmg, m.region || "chest", m.w || "ak47", new R(0, 0, 0), !1); } catch (e) {}
 }
+netFindByNet(id) {
+    // 按网络身份 netId 找本地 actor（自己 / host bot / 远程化身都带 netId）。每个客户端对每个联机实体
+    // 都持有一个 actor（自己拥有的或远程化身），故据 kill 广播在所有端一致累加统计，计分板才人人对齐。
+    if (id == null) return null;
+    if (this.player && this.player.netId === id) return this.player;
+    for (let a of this.actors) if (a.netId === id) return a;
+    return null;
+}
+applyNetStats(map) {
+    // 服务器权威 stats 表 → 写进各本地 actor（自己 / host bot / 远程化身都据 netId 可查）。
+    // 幂等覆盖：晚创建的远程化身会在后续 tick 被补写，故计分板在所有端一致（根治「只有一个人有击杀数据」）。
+    if (!map) return;
+    for (let id in map) {
+        let a = this.netFindByNet(+id);
+        if (a && a.stats) { a.stats.k = map[id].k; a.stats.d = map[id].d; a.stats.hs = map[id].hs; }
+    }
+}
+adoptBots() {
+    // 成为房主：把手里所有 bot 远程化身翻成本地拥有 → 引擎主循环开始为其跑 AI，不再冻结（根治换房主 bot 冻结）。
+    for (let a of this.actors) if (a instanceof Fa && a.isRemote && a.netId >= 1000) {
+        a.isRemote = !1; delete this.remotes[a.netId];
+    }
+}
+releaseBots() {
+    // 被降级：把本地拥有的 bot 交还为远程化身 → 停止本地 AI，改由新房主的 world 快照驱动（避免两端同时模拟同一 bot）。
+    for (let a of this.actors) if (a instanceof Fa && !a.isRemote && a.netId >= 1000) {
+        a.isRemote = !0; this.remotes[a.netId] = a;
+        a._nt = a._nt || { x: a.pos.x, y: a.pos.y, z: a.pos.z, yaw: a.yaw, pitch: a.pitch || 0 };
+    }
+}
+_predKill(victim, hs, w) {
+    // 本地击杀预测：命中把远程化身预测血量打到 <=0 时**立刻**给击杀横幅 + 音效，消除等服务器 frag 回传的
+    // 「几秒延迟」感。计分仍以服务器权威 stats 为准；服务器 frag 回来时若已预测过就跳过重复横幅（见 netShowKill）。
+    this._nkN = (this.time - (this._nkT == null ? -99 : this._nkT) < 5) ? (this._nkN || 1) + 1 : 1;
+    this._nkT = this.time;
+    let l = Math.min(this._nkN, 8), c, h = "击杀 " + (victim.name || "敌人");
+    if (l >= 2 && typeof Kf !== "undefined") {
+        c = Kf[l]; h = Ay[l] + " \xB7 " + h;
+        setTimeout(() => { try { Jt.announce(Kf[l].toLowerCase().replace(/\b\w/g, u => u.toUpperCase()) + "!"); } catch (e) {} }, 120);
+    } else if (hs) { c = "HEADSHOT"; h = "爆头 \xB7 " + h; setTimeout(() => { try { Jt.announce("Headshot!"); } catch (e) {} }, 120); }
+    else if (w === "knife") c = "KNIFE KILL";
+    else if (w === "he") c = "GRENADE KILL";
+    else c = "KILL";
+    try { this.hud.badge(c, h, hs); Jt.playKillConfirm(hs); } catch (e) {}
+}
 netShowKill(m) {
     // feature3: 联机击杀反馈——复用原版 killFeed / badge / 击杀播报音（Kf/Ay/playKillConfirm/announce）。
     let killer = m.killerName ? { name: m.killerName, team: m.killerTeam || "GR" } : null;
     let victim = { name: m.victimName || ("玩家" + m.victim), team: m.victimTeam || "BL" };
     let hs = !!m.hs, w = m.w || "ak47";
     let involves = m.killer === this.netId || m.victim === this.netId;
+    // 计分完全走服务器权威 stats 表（applyNetStats），此处只负责视听展示：killFeed / 多杀横幅 / 播报音。
     try { if (this.hud && this.hud.killFeed) this.hud.killFeed(killer, victim, w, hs, !1, involves); } catch (e) {}
     if (m.killer === this.netId) {
+        let _va = this.netFindByNet(m.victim);
+        if (_va && _va._pk) { _va._pk = 0; _va._ph = null; } // 已本地预测击杀，跳过重复横幅（去抖）
+        else {
         // 我击杀：本地维护一个简单多杀计数（5s 窗口），复用原版横幅 + 语音播报
         this._nkN = (this.time - (this._nkT == null ? -99 : this._nkT) < 5) ? (this._nkN || 1) + 1 : 1;
         this._nkT = this.time;
@@ -636,6 +708,7 @@ netShowKill(m) {
         else if (w === "he") c = "GRENADE KILL";
         else c = "KILL";
         try { this.hud.badge(c, h, hs); Jt.playKillConfirm(hs); } catch (e) {}
+        }
     }
 }
 enterLobby() {
@@ -681,7 +754,18 @@ netToLobby() {
     try { document.fullscreenElement && document.exitFullscreen && document.exitFullscreen().catch(() => {}); } catch (e) {}
     try { document.pointerLockElement && document.exitPointerLock(); } catch (e) {}
     this.playing = !1; this.ended = !1;
-    this.actors = []; this.tags = []; this.player = null; this.remotes = {};
+    // feature3: 回大厅前把上一局的网格从场景移除，否则下一局 startMatch 时 this.actors 已被清空、
+    // 清理循环无从下手，旧的士兵/名牌/手雷/虎蹲炮网格会残留在场景里影响新对局。
+    try {
+        let sc = this.renderer && this.renderer.scene;
+        if (sc) {
+            for (let a of (this.actors || [])) { try { sc.remove(a.soldier.root); } catch (e) {} }
+            for (let g of (this.tags || [])) { try { sc.remove(g.sprite); } catch (e) {} }
+            for (let g of (this.nades || [])) { try { sc.remove(g.mesh); } catch (e) {} }
+            for (let g of (this.mortars || [])) { try { sc.remove(g.mesh); } catch (e) {} }
+        }
+    } catch (e) {}
+    this.actors = []; this.tags = []; this.nades = []; this.mortars = []; this.player = null; this.remotes = {};
     try { this.vm && this.vm.setVisible(!1); } catch (e) {}
     this.hud.show("menu");
     this.netShowLobby();
@@ -745,7 +829,7 @@ renderLobby() {
     actEl.innerHTML = "";
     let btn = (txt, cb) => { let e = document.createElement("button"); e.textContent = txt; e.style.cssText = "padding:10px 20px;border-radius:8px;border:none;background:#4a90d9;color:#fff;font-weight:700;cursor:pointer;font-size:15px"; e.addEventListener("click", cb); actEl.appendChild(e); };
     let note = t => { let e = document.createElement("span"); e.textContent = t; e.style.color = "#8fa6bd"; actEl.appendChild(e); };
-    if (this.roomState === "playing") btn("加入战场", () => this.netEnterMatch()); // 热加入：对局进行中也可直接进入
+    if (this.roomState === "playing") { btn("加入战场", () => this.netEnterMatch()); if (host) note("按 F2 终止当前对局"); } // 热加入：对局进行中也可直接进入
     else if (host) btn("开始对局", () => this.netStartHost());
     else note("等待房主开始…");
     let back = document.createElement("button");
@@ -814,7 +898,8 @@ net_dmg_old = "damage(t,e,i,n,s,a,o,l){if(!t.alive"
 net_dmg_new = ("damage(t,e,i,n,s,a,o,l){if(this.mp&&t.isRemote){"
                "let _ok=t.alive&&t.protectT<=0&&e&&e.team!==t.team;"
                "this.netOwns(e)&&_ok&&this.netHit(t,e,i,n,s);"
-               "e===this.player&&_ok&&(this.hud.hitmarker(n===\"head\",!1),Jt.playHitmarker(n===\"head\"));"
+               "if(e===this.player&&_ok){this.hud.hitmarker(n===\"head\",!1),Jt.playHitmarker(n===\"head\");"
+               "t._ph=(t._ph==null?t.hp:t._ph)-i;if(t._ph<=0&&!t._pk){t._pk=1,this._predKill(t,n===\"head\",s)}}"
                "return}if(!t.alive")
 assert html.count(net_dmg_old) == 1, "net damage marker"
 html = html.replace(net_dmg_old, net_dmg_new, 1)
@@ -825,6 +910,32 @@ dmg_cap_old = "t.lastAttacker=e,t.lastHurt=this.time;"
 dmg_cap_new = "t.lastAttacker=e,t.lastHurt=this.time,t._lastW=s,t._lastN=n;"
 assert html.count(dmg_cap_old) == 1, "damage capture marker"
 html = html.replace(dmg_cap_old, dmg_cap_new, 1)
+
+# 7) feature1: 联机时 kill() 的本地统计/计分/击杀播报全部屏蔽（改由服务器 kill 广播 → netShowKill
+#    在每个客户端一致累加，见 netFindByNet）。否则只有「本地权威那一方」的 actor 有击杀数、其余为 0，
+#    且会与 netShowKill 的播报/killfeed 双份触发（表现为死亡瞬间「闪」几下）。单机路径 this.mp 假，全不受影响。
+kill_death_old = "t.respawnT=4,t.stats.d++,"
+kill_death_new = "t.respawnT=4,this.mp||t.stats.d++,"
+assert html.count(kill_death_old) == 1, "kill death-count marker"
+html = html.replace(kill_death_old, kill_death_new, 1)
+
+kill_score_old = "if(e&&e!==t&&(e.stats.k++,n&&e.stats.hs++,this.score[e.team]++,"
+kill_score_new = "if(e&&e!==t&&!this.mp&&(e.stats.k++,n&&e.stats.hs++,this.score[e.team]++,"
+assert html.count(kill_score_old) == 1, "kill scoring marker"
+html = html.replace(kill_score_old, kill_score_new, 1)
+
+kill_feed_old = "this.hud.killFeed(e&&e!==t?e:null,t,i,n,s,e===o||t===o),e===o&&t!==o){"
+kill_feed_new = "this.mp||this.hud.killFeed(e&&e!==t?e:null,t,i,n,s,e===o||t===o),!this.mp&&e===o&&t!==o){"
+assert html.count(kill_feed_old) == 1, "kill feed/badge marker"
+html = html.replace(kill_feed_old, kill_feed_new, 1)
+
+# 8) feature3: startMatch 重置时清理虎蹲炮网格（原版只清 actors/tags/nades，漏了 this.mortars）+ 复位
+#    remotes/mortars 数组，避免上一局的炮身/在飞炮弹/远程化身残留到下一局（单机重开同样受益）。
+start_reset_old = "this.actors=[],this.nades=[],this.tags=[],this.timers=[]"
+start_reset_new = ("(this.mortars||[]).forEach(x=>{try{this.renderer.scene.remove(x.mesh)}catch(e){}}),"
+                   "this.actors=[],this.nades=[],this.tags=[],this.mortars=[],this.remotes={},this.timers=[]")
+assert html.count(start_reset_old) == 1, "startMatch reset marker"
+html = html.replace(start_reset_old, start_reset_new, 1)
 
 html = html.replace(old_trace, lock_method + skill_method + cannon_method + net_method + old_trace, 1)
 
