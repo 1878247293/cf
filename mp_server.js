@@ -26,6 +26,7 @@ let roomCfg = { size: 5, diff: "normal", goal: 50, tod: "day" };
 let roomState = "lobby";   // lobby=大厅；playing=对局进行中
 let changed = new Set();   // 自上次 tick 起有更新的 netId（增量下发用）
 let tickSeq = 0, kfCount = 0;
+let forceKeyframe = false;  // 换房主/掉线迁移后置位：下一 tick 强制全量下发，新房主据此立刻收编所有 bot（免最长 1s 冻结窗口）
 
 // 玩家名用「最小空闲编号」：在场编号不变，空号留给下一个进来的人。slot 即 netId。
 function lowestFreeSlot() { let n = 1; while (clients.has(n)) n++; return n; }
@@ -94,6 +95,7 @@ function assignBots(host) {
   const ids = [];
   for (const id of world.keys()) if (id >= 1000) ids.push(id);
   send(host, { t: "botsassign", ids });
+  forceKeyframe = true; // 迁移后强制下一 tick 全量：新房主立刻拿到全部 bot 快照并收编，不用等下一个关键帧
 }
 
 function handleMsg(client, str) {
@@ -244,7 +246,8 @@ function onConnect(sock) {
 setInterval(() => {
   if (roomState !== "playing") return;
   kfCount++;
-  const keyframe = kfCount % KEYFRAME_EVERY === 0;
+  const keyframe = forceKeyframe || kfCount % KEYFRAME_EVERY === 0;
+  forceKeyframe = false;
   let ents;
   if (keyframe) ents = [...world.values()];
   else {

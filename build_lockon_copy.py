@@ -690,6 +690,13 @@ netShowKill(m) {
     let involves = m.killer === this.netId || m.victim === this.netId;
     // 计分完全走服务器权威 stats 表（applyNetStats），此处只负责视听展示：killFeed / 多杀横幅 / 播报音。
     try { if (this.hud && this.hud.killFeed) this.hud.killFeed(killer, victim, w, hs, !1, involves); } catch (e) {}
+    // 服务器权威 frag 一到就地放倒受害者化身，不等它自己上报 al:0——受害者端卡顿/浏览器后台节流时
+    // 快照会滞后好几秒，模型就会「人死了还站着」。frag 是服务器唯一击杀事件，据它放倒最及时。
+    let _vv = this.netFindByNet(m.victim);
+    if (_vv && _vv !== this.player && _vv.alive) {
+        _vv.alive = !1; _vv.hp = 0; _vv._pk = 0; _vv._ph = null;
+        if (_vv.soldier && _vv.soldier.die) { try { _vv.soldier.die(_vv.pos.x, _vv.pos.z, hs ? "head" : "chest"); } catch (e) {} }
+    }
     if (m.killer === this.netId) {
         let _va = this.netFindByNet(m.victim);
         if (_va && _va._pk) { _va._pk = 0; _va._ph = null; } // 已本地预测击杀，跳过重复横幅（去抖）
