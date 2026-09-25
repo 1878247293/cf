@@ -12,6 +12,7 @@
 | `mp_server.js` | 纯 Node 零依赖联机中继（自实现 RFC6455 WebSocket 握手 + 帧读写） |
 | `start_server.bat` | 一键启动服务器 |
 | `test_mp_server.js` | 服务器集成测试（真实 WebSocket 双客户端） |
+| `deploy/` | VPS 部署包：systemd 单元 + Nginx 反代（含 WebSocket）+ 一键安装/卸载 |
 
 ## 增强内容（`build_lockon_copy.py` 注入）
 
@@ -36,6 +37,23 @@ node test_mp_server.js         # 跑服务器集成测试
 ```
 
 > ⚠️ **联机服务器无鉴权**：任何拿到地址的人都能加入，且客户端权威模型可被篡改。仅限熟人自娱，勿部署到业务/敏感服务器；建议用冷门端口、随用随关，并开放对应防火墙/安全组端口。
+
+## 部署到 VPS（Ubuntu/Debian）
+
+中继服务只监听 `127.0.0.1:8080`，由 Nginx 对外反代并透传 WebSocket 升级头。
+
+```bash
+# 在本机打包上传到服务器后，在服务器上执行：
+cd cf
+sudo bash deploy/setup.sh                                  # 开放访问（无鉴权）
+sudo ENABLE_AUTH=yes AUTH_USER=player AUTH_PASS=xxx bash deploy/setup.sh   # 带口令门禁，推荐
+sudo bash deploy/teardown.sh                               # 下线并清理
+```
+
+`setup.sh` 会：安装 nginx → 创建无特权用户 `cfmp` → 拷贝运行文件到 `/opt/cf`（不含 `page.html` 与构建脚本）
+→ 注册 systemd 服务 → 配置 Nginx 反代 → 自检 HTTP 200 与 WebSocket 握手 101。
+
+部署后需在云厂商安全组放行 TCP 80（HTTPS 另需 443）。
 
 ## 版权说明
 

@@ -16,3 +16,7 @@ Desktop.ini
 # editor
 .vscode/
 .idea/
+
+# workbuddy / tool artifacts
+.workbuddy/
+.wbapp_*.genie

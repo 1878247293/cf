@@ -1,0 +1,41 @@
+[Unit]
+Description=CF transport-ship MP relay (Node WebSocket)
+Documentation=file:/opt/cf/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cfmp
+Group=cfmp
+WorkingDirectory=/opt/cf
+# 中继服务只监听回环，由 Nginx 对外反代；端口不直接暴露公网
+Environment=PORT=8080
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/cf/mp_server.js
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# 安全加固：无特权、只读根、私有临时目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+ReadWritePaths=/opt/cf
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cf-mp
+
+[Install]
+WantedBy=multi-user.target

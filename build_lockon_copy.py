@@ -427,6 +427,15 @@ netConnect() {
     ws.onmessage = (e) => { try { this.onNetMsg(JSON.parse(e.data)); } catch (err) {} };
     ws.onclose = () => { this._ws = null; };
     ws.onerror = () => {};
+    if (!this._grabWired) { // F1 抢房主：仅大厅可抢（对局进行中禁用，避免中途接管使 bot 冻结）
+        this._grabWired = true;
+        window.addEventListener("keydown", (ev) => {
+            if (ev.code === "F1" && this.mp) {
+                ev.preventDefault();
+                if (!this.isHost && this.roomState !== "playing") this.netSend({ t: "grabhost" });
+            }
+        });
+    }
 }
 netSend(o) {
     let w = this._ws;
@@ -440,12 +449,31 @@ netOwns(a) {
 onNetMsg(m) {
     if (m.t === "welcome") {
         this.netId = m.slot; this.isHost = !!m.host;
+        if (m.cfg) this.roomCfg = m.cfg;
+        this.roomState = m.state || "lobby";
         if (this.player) { this.player.netId = m.slot; this.player.name = "玩家" + m.slot; }
+        this.renderLobby();
         return;
     }
-    if (m.t === "host") { this.isHost = true; return; }
-    if (m.t === "roster") { this.netRoster = m.players; return; }
-    if (m.t === "leave") { this.removeRemote(m.slot); return; }
+    if (m.t === "host") { // 房主变更（顺延 / F1 抢夺）：带 slot 时据 netId 判定，兼容旧无 slot 广播
+        let was = this.isHost;
+        this.isHost = (m.slot == null) ? true : (m.slot === this.netId);
+        if (this.isHost && !was && this.hud && this.hud.toast) this.hud.toast("你已成为房主", 1.5);
+        else if (!this.isHost && was && this.hud && this.hud.toast) this.hud.toast("房主已被接管", 1.5);
+        this.renderLobby(); return;
+    }
+    if (m.t === "roster") { this.netRoster = m.players; this.renderLobby(); return; }
+    if (m.t === "config") { this.roomCfg = m.cfg || this.roomCfg; this.renderLobby(); return; }
+    if (m.t === "start") { // 只有非房主会收到（服务器已排除房主）→ 需要一次点击手势进入
+        this.roomState = "playing"; this.pendingStart = m.cfg || this.roomCfg; this.renderLobby(); return;
+    }
+    if (m.t === "end") { // 房主结束本局 → 全体回大厅
+        this.roomState = "lobby"; this.pendingStart = null;
+        if (this.playing || this.ended) this.netToLobby();
+        this.renderLobby();
+        return;
+    }
+    if (m.t === "leave") { this.removeRemote(m.slot); this.renderLobby(); return; }
     if (m.t === "score" && this.score) { this.score.BL = m.BL; this.score.GR = m.GR; return; }
     if (!this.playing) return;
     if (m.t === "state") this.applyNetState(m);
@@ -474,7 +502,9 @@ netUpdate(t) {
         if (a._wa && !a.alive) {
             let k = a.lastAttacker;
             this.netSend({ t: "kill", killer: k && k.netId ? k.netId : 0, killerName: k ? k.name : "",
-                victim: a.netId, team: k && k.team ? k.team : null });
+                killerTeam: k && k.team ? k.team : null, victim: a.netId, victimName: a.name, victimTeam: a.team,
+                w: a._lastW || (a.weapon ? a.weapon.def.id : "ak47"), hs: a._lastN === "head",
+                team: k && k.team ? k.team : null });
         }
         a._wa = a.alive;
     }
@@ -508,8 +538,11 @@ applyNetState(m) {
         av.speed = s.sp; av.crouch = !!s.cr; av.onGround = !!s.og; av.pitch = s.pitch;
         let wasAlive = av.alive;
         av.alive = !!s.al; av.hp = s.hp; av.protectT = 0;
-        if (av.alive && !wasAlive) av.deadT = 0;
+        if (av.alive && !wasAlive) { av.deadT = 0; if (av.soldier && av.soldier.reset) { try { av.soldier.reset(); } catch (e) {} } }
         else if (!av.alive && wasAlive && av.soldier && av.soldier.die) { try { av.soldier.die(av.pos.x, av.pos.z, "chest"); } catch (e) {} }
+        // 兜底：快照说活着但 soldier 还卡在死亡趴地姿势（滑铲后死亡再生、丢包错序等）→ 强制起身。
+        // 远程化身永远不走 spawnActor→spawn→soldier.reset()，只能在这里手动复位，否则永久躺地。
+        if (av.alive && av.soldier && av.soldier.deadT >= 0 && av.soldier.reset) { try { av.soldier.reset(); } catch (e) {} }
     }
 }
 addRemote(s) {
@@ -564,16 +597,159 @@ netTakeHit(m) {
     try { this.damage(victim, atk, m.dmg, m.region || "chest", m.w || "ak47", new R(0, 0, 0), !1); } catch (e) {}
 }
 netShowKill(m) {
-    try {
-        if (this.hud && this.hud.toast)
-            this.hud.toast((m.killerName || ("玩家" + m.killer)) + " 消灭了 玩家" + m.victim, 2);
-    } catch (e) {}
+    // feature3: 联机击杀反馈——复用原版 killFeed / badge / 击杀播报音（Kf/Ay/playKillConfirm/announce）。
+    let killer = m.killerName ? { name: m.killerName, team: m.killerTeam || "GR" } : null;
+    let victim = { name: m.victimName || ("玩家" + m.victim), team: m.victimTeam || "BL" };
+    let hs = !!m.hs, w = m.w || "ak47";
+    let involves = m.killer === this.netId || m.victim === this.netId;
+    try { if (this.hud && this.hud.killFeed) this.hud.killFeed(killer, victim, w, hs, !1, involves); } catch (e) {}
+    if (m.killer === this.netId) {
+        // 我击杀：本地维护一个简单多杀计数（5s 窗口），复用原版横幅 + 语音播报
+        this._nkN = (this.time - (this._nkT == null ? -99 : this._nkT) < 5) ? (this._nkN || 1) + 1 : 1;
+        this._nkT = this.time;
+        let l = Math.min(this._nkN, 8), c, h = "击杀 " + victim.name;
+        if (l >= 2 && typeof Kf !== "undefined") {
+            c = Kf[l]; h = Ay[l] + " \xB7 " + h;
+            setTimeout(() => { try { Jt.announce(Kf[l].toLowerCase().replace(/\b\w/g, u => u.toUpperCase()) + "!"); } catch (e) {} }, 150);
+        } else if (hs) {
+            c = "HEADSHOT"; h = "爆头 \xB7 " + h;
+            setTimeout(() => { try { Jt.announce("Headshot!"); } catch (e) {} }, 150);
+        } else if (w === "knife") c = "KNIFE KILL";
+        else if (w === "he") c = "GRENADE KILL";
+        else c = "KILL";
+        try { this.hud.badge(c, h, hs); Jt.playKillConfirm(hs); } catch (e) {}
+    }
+}
+enterLobby() {
+    if (this.playing) return;
+    this.mp = !0;
+    this.roomCfg = this.roomCfg || { size: 5, diff: "normal", goal: 50, tod: "day" };
+    this.netConnect();
+    this.netShowLobby();
+}
+netHumanCounts() {
+    let m = { BL: 0, GR: 0 }, r = this.netRoster || [];
+    for (let p of r) if (p.team === "BL" || p.team === "GR") m[p.team]++;
+    if (!r.length && this.player && this.player.team) m[this.player.team] = 1;
+    return m;
+}
+applyRoomCfg() {
+    let c = this.roomCfg; if (!c) return;
+    if (c.size) this.opts.size = c.size;
+    if (c.diff) this.opts.diff = c.diff;
+    if (c.goal) this.opts.goal = c.goal;
+    if (c.tod) this.opts.tod = c.tod;
+}
+netStartHost() {
+    this.applyRoomCfg();
+    this.netSend({ t: "start" });
+    this.roomState = "playing"; this.pendingStart = null;
+    this.netHideLobby();
+    this.startMatch();
+}
+netEnterMatch() {
+    this.applyRoomCfg();
+    this.roomState = "playing"; this.pendingStart = null;
+    this.netHideLobby();
+    this.startMatch();
+}
+netEndMatch() {
+    if (!this.mp) return;
+    if (this.isHost) this.netSend({ t: "end" });
+    this.roomState = "lobby"; this.pendingStart = null;
+}
+netToLobby() {
+    try { navigator.keyboard && navigator.keyboard.unlock && navigator.keyboard.unlock(); } catch (e) {}
+    try { document.fullscreenElement && document.exitFullscreen && document.exitFullscreen().catch(() => {}); } catch (e) {}
+    try { document.pointerLockElement && document.exitPointerLock(); } catch (e) {}
+    this.playing = !1; this.ended = !1;
+    this.actors = []; this.tags = []; this.player = null; this.remotes = {};
+    try { this.vm && this.vm.setVisible(!1); } catch (e) {}
+    this.hud.show("menu");
+    this.netShowLobby();
+}
+netShowLobby() {
+    let box = document.getElementById("mpLobby");
+    if (!box) {
+        box = document.createElement("div");
+        box.id = "mpLobby";
+        box.style.cssText = "position:fixed;inset:0;z-index:200;background:rgba(8,12,18,.92);color:#e8eef4;font:14px/1.5 system-ui,sans-serif;display:flex;align-items:center;justify-content:center";
+        box.innerHTML = '<div style="width:min(720px,94vw);background:#121a24;border:1px solid #2a3b4d;border-radius:12px;padding:22px 24px;box-shadow:0 12px 40px #000a"><div style="font-size:20px;font-weight:700;letter-spacing:1px">联机房间</div><div id="mpSub" style="color:#8fa6bd;margin:4px 0 14px"></div><div id="mpTeams" style="display:flex;gap:14px"></div><div id="mpCfg" style="margin-top:16px"></div><div id="mpAct" style="margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"></div></div>';
+        document.body.appendChild(box);
+    }
+    box.style.display = "flex";
+    this.renderLobby();
+}
+netHideLobby() { let b = document.getElementById("mpLobby"); if (b) b.style.display = "none"; }
+renderLobby() {
+    let box = document.getElementById("mpLobby");
+    if (!box || box.style.display === "none") return;
+    let cfg = this.roomCfg || { size: 5, diff: "normal", goal: 50, tod: "day" };
+    let roster = this.netRoster || [], me = this.netId, host = this.isHost;
+    document.getElementById("mpSub").textContent = "你是 玩家" + (me || "?") + (host ? "（房主）" : "")
+        + " \xB7 " + cfg.size + "v" + cfg.size + (this.roomState === "playing" ? " \xB7 对局进行中" : "");
+    let teamsEl = document.getElementById("mpTeams");
+    let mk = (tm, label) => {
+        let players = roster.filter(p => p.team === tm), bots = Math.max(0, cfg.size - players.length);
+        let mine = roster.find(p => p.slot === me), on = mine && mine.team === tm;
+        let rows = players.map(p => '<div style="padding:4px 8px;border-radius:6px;background:#1b2836;margin:4px 0">'
+            + (p.slot === me ? "▶ " : "") + "玩家" + p.slot + (p.host ? " \u{1F451}" : "") + "</div>").join("");
+        for (let i = 0; i < bots; i++) rows += '<div style="padding:4px 8px;border-radius:6px;background:#141d28;margin:4px 0;color:#6d8199">人机</div>';
+        return '<div style="flex:1"><button data-team="' + tm + '" class="mpJoin" style="width:100%;padding:8px;border-radius:8px;border:1px solid '
+            + (on ? "#4a90d9" : "#2a3b4d") + ';background:' + (on ? "#1d3550" : "#16212e") + ';color:#e8eef4;cursor:pointer;font-weight:600">'
+            + label + (on ? "（我方）" : "") + "</button>" + rows + "</div>";
+    };
+    teamsEl.innerHTML = mk("BL", "潜伏者 BL") + mk("GR", "保卫者 GR");
+    for (let b of teamsEl.querySelectorAll(".mpJoin")) b.addEventListener("click", () => {
+        let tm = b.dataset.team; this.opts.team = tm; this.netSend({ t: "join", team: tm }); this.renderLobby();
+    });
+    let cfgEl = document.getElementById("mpCfg");
+    if (host && this.roomState !== "playing") {
+        let seg = (key, label, vals) => {
+            let btns = vals.map(v => '<button data-ck="' + key + '" data-cv="' + v[0] + '" style="padding:6px 10px;border-radius:6px;border:1px solid '
+                + (String(cfg[key]) === String(v[0]) ? "#4a90d9" : "#2a3b4d") + ';background:' + (String(cfg[key]) === String(v[0]) ? "#1d3550" : "#16212e")
+                + ';color:#e8eef4;cursor:pointer;margin:0 4px 6px 0">' + v[1] + "</button>").join("");
+            return '<div style="margin:6px 0"><span style="color:#8fa6bd;display:inline-block;width:88px">' + label + "</span>" + btns + "</div>";
+        };
+        cfgEl.innerHTML = seg("size", "每队人数", [[4, "4v4"], [5, "5v5"], [6, "6v6"], [8, "8v8"]])
+            + seg("diff", "人机难度", [["easy", "简单"], ["normal", "普通"], ["hard", "困难"], ["hell", "地狱"]])
+            + seg("goal", "胜利分数", [[30, "30"], [50, "50"], [100, "100"]])
+            + seg("tod", "时间", [["day", "白天"], ["dusk", "黄昏"]]);
+        for (let b of cfgEl.querySelectorAll("button")) b.addEventListener("click", () => {
+            let k = b.dataset.ck, v = b.dataset.cv; v = isNaN(+v) ? v : +v;
+            this.roomCfg[k] = v; this.netSend({ t: "config", cfg: this.roomCfg }); this.renderLobby();
+        });
+    } else {
+        cfgEl.innerHTML = '<div style="color:#8fa6bd">配置：' + cfg.size + "v" + cfg.size + " \xB7 难度 " + cfg.diff
+            + " \xB7 目标 " + cfg.goal + " \xB7 " + (cfg.tod === "dusk" ? "黄昏" : "白天") + (host ? "" : "（仅房主可改）") + "</div>";
+    }
+    let actEl = document.getElementById("mpAct");
+    actEl.innerHTML = "";
+    let btn = (txt, cb) => { let e = document.createElement("button"); e.textContent = txt; e.style.cssText = "padding:10px 20px;border-radius:8px;border:none;background:#4a90d9;color:#fff;font-weight:700;cursor:pointer;font-size:15px"; e.addEventListener("click", cb); actEl.appendChild(e); };
+    let note = t => { let e = document.createElement("span"); e.textContent = t; e.style.color = "#8fa6bd"; actEl.appendChild(e); };
+    if (this.pendingStart) btn("点击进入战场", () => this.netEnterMatch());
+    else if (this.roomState === "playing") note("对局进行中，等待下一局…");
+    else if (host) btn("开始对局", () => this.netStartHost());
+    else note("等待房主开始…");
+    if (host && this.roomState === "playing") { // 房主在大厅可直接终止前面已开始的对局→全体回大厅
+        let e = document.createElement("button");
+        e.textContent = "终止对局";
+        e.style.cssText = "padding:10px 20px;border-radius:8px;border:none;background:#c0392b;color:#fff;font-weight:700;cursor:pointer;font-size:15px";
+        e.addEventListener("click", () => { this.netEndMatch(); this.renderLobby(); });
+        actEl.appendChild(e);
+    }
+    let back = document.createElement("button");
+    back.textContent = "退出联机";
+    back.style.cssText = "padding:10px 16px;border-radius:8px;border:1px solid #2a3b4d;background:#16212e;color:#cbd6e2;cursor:pointer";
+    back.addEventListener("click", () => { try { this._ws && this._ws.close(); } catch (e) {} this._ws = null; this.mp = !1; this.netHideLobby(); });
+    actEl.appendChild(back);
 }
 '''
 
-# 1) init 早连服务器（越早越好，好让开赛前就知道自己是不是 host，从而决定要不要生成 bot）
+# 1) init：不再用 ?mp=1 直接置 mp；改由菜单「联机」按钮进大厅。但保留 ?mp=1 作为「自动进大厅」
+#    的快捷方式（服务器 / 会把玩家重定向到 ?mp=1，一进来就直接是联机流程）。setTimeout 让 init 跑完再进。
 net_init_old = "this.hud=new oc(this),this.opts=this.hud.opts,"
-net_init_new = "this.hud=new oc(this),this.opts=this.hud.opts,this.mp=this.qs.has(\"mp\"),this.mp&&this.netConnect(),"
+net_init_new = "this.hud=new oc(this),this.opts=this.hud.opts,this.mp=!1,this.qs.has(\"mp\")&&setTimeout(()=>this.enterLobby(),0),"
 assert html.count(net_init_old) == 1, "net init marker"
 html = html.replace(net_init_old, net_init_new, 1)
 
@@ -590,6 +766,33 @@ net_bot_new = 'for(let h=0;h<c&&(!this.mp||this.isHost);h++){let u=new Fa(this,{
 assert html.count(net_bot_old) == 1, "net bot-gate marker"
 html = html.replace(net_bot_old, net_bot_new, 1)
 
+# 3b) 联机时按房间人数补齐 bot：每队 bot 数 = size - 该队真人数（真人含本地玩家，从 roster 统计）。
+#     单机时保持原逻辑（本队 a-1、敌队 a）。只有 host 真正生成 bot（见 3 的门控）。
+net_count_old = 'for(let l of[e,i]){let c=l===e?a-1:a;'
+net_count_new = 'let __hm=this.mp?this.netHumanCounts():null;for(let l of[e,i]){let c=__hm?Math.max(0,a-(__hm[l]||0)):(l===e?a-1:a);'
+assert html.count(net_count_old) == 1, "net bot-count marker"
+html = html.replace(net_count_old, net_count_new, 1)
+
+# 3c) endMatch：联机时通知服务器本局结束（房主发 end→全体回大厅）
+net_end_old = "endMatch(){this.ended=!0,this.playing=!1;"
+net_end_new = "endMatch(){this.mp&&this.netEndMatch();this.ended=!0,this.playing=!1;"
+assert html.count(net_end_old) == 1, "net endMatch marker"
+html = html.replace(net_end_old, net_end_new, 1)
+
+# 3d) 菜单加「联机对战」按钮（单机仍走原 btnStart）；再把按钮接到 enterLobby
+menu_btn_old = 'id="btnStart">\\u5F00 \\u59CB \\u6E38 \\u620F</button>'
+menu_btn_new = ('id="btnStart">\\u5F00 \\u59CB \\u6E38 \\u620F</button>'
+                '<button class="go" id="btnMulti" style="margin-top:10px;background:#2f6fb3">'
+                '\\u8054\\u673A\\u5BF9\\u6218</button>')
+assert html.count(menu_btn_old) == 1, "menu btnMulti marker"
+html = html.replace(menu_btn_old, menu_btn_new, 1)
+
+net_wire_old = 'Yn("#btnStart").addEventListener("click",()=>this.g.startMatch()),'
+net_wire_new = ('Yn("#btnStart").addEventListener("click",()=>this.g.startMatch()),'
+                'Yn("#btnMulti")&&Yn("#btnMulti").addEventListener("click",()=>this.g.enterLobby()),')
+assert html.count(net_wire_old) == 1, "net btnMulti wire marker"
+html = html.replace(net_wire_old, net_wire_new, 1)
+
 # 4) 主循环：远程化身不跑 AI；每帧驱动联机（发本地快照 / 插值远程 / 判死播报）
 net_loop_old = "for(let i of this.actors)i.isPlayer||i.update(t);"
 net_loop_new = "for(let i of this.actors)i.isPlayer||i.isRemote||i.update(t);this.mp&&this.netUpdate(t);"
@@ -599,9 +802,19 @@ html = html.replace(net_loop_old, net_loop_new, 1)
 # 5) damage：打到「远程化身」时本地不扣血，改成把命中发给该化身的属主（属主本地权威扣血）
 net_dmg_old = "damage(t,e,i,n,s,a,o,l){if(!t.alive"
 net_dmg_new = ("damage(t,e,i,n,s,a,o,l){if(this.mp&&t.isRemote){"
-               "this.netOwns(e)&&t.alive&&t.protectT<=0&&e.team!==t.team&&this.netHit(t,e,i,n,s);return}if(!t.alive")
+               "let _ok=t.alive&&t.protectT<=0&&e&&e.team!==t.team;"
+               "this.netOwns(e)&&_ok&&this.netHit(t,e,i,n,s);"
+               "e===this.player&&_ok&&(this.hud.hitmarker(n===\"head\",!1),Jt.playHitmarker(n===\"head\"));"
+               "return}if(!t.alive")
 assert html.count(net_dmg_old) == 1, "net damage marker"
 html = html.replace(net_dmg_old, net_dmg_new, 1)
+
+# 6) feature3: 记录受害者最后一次被打的武器/部位，供联机击杀播报复用
+#    （本地命中与网络命中 netTakeHit 最终都会经过 damage，所以在这里存最稳）
+dmg_cap_old = "t.lastAttacker=e,t.lastHurt=this.time;"
+dmg_cap_new = "t.lastAttacker=e,t.lastHurt=this.time,t._lastW=s,t._lastN=n;"
+assert html.count(dmg_cap_old) == 1, "damage capture marker"
+html = html.replace(dmg_cap_old, dmg_cap_new, 1)
 
 html = html.replace(old_trace, lock_method + skill_method + cannon_method + net_method + old_trace, 1)
 

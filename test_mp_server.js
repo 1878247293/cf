@@ -62,6 +62,75 @@ const last = (ws, t) => [...ws.msgs].reverse().find((m) => m.t === t);
   const rb = last(b, "roster");
   ok(rb && rb.players.length === 1 && rb.players[0].slot === 2, "roster shrinks after leave");
 
+  // 最小空闲编号：玩家1 已走，b 占 slot2 → 新连接应拿回 slot1、名「玩家1」
+  const c = await open();
+  await wait(80);
+  const wc = c.msgs.find((m) => m.t === "welcome");
+  ok(wc && wc.slot === 1 && wc.name === "玩家1", "reuses lowest free slot (1) after leave");
+  ok(wc && wc.host === false && wc.cfg && wc.state === "lobby", "welcome carries cfg + lobby state");
+
+  // 房主改配置：b 现在是房主，改 size/goal → 全员收到 config 广播
+  b.send(JSON.stringify({ t: "config", cfg: { size: 6, goal: 100 } }));
+  await wait(80);
+  const cfgC = last(c, "config");
+  ok(cfgC && cfgC.cfg && cfgC.cfg.size === 6 && cfgC.cfg.goal === 100, "host config broadcast");
+
+  // 非房主改配置无效：c 发 config 不应改变房间
+  c.send(JSON.stringify({ t: "config", cfg: { size: 4 } }));
+  await wait(80);
+  const cfgC2 = last(c, "config");
+  ok(!cfgC2 || cfgC2.cfg.size === 6, "non-host config ignored");
+
+  // 房主开局：start → playing，非房主收到 start{cfg}，分数清零
+  b.send(JSON.stringify({ t: "start" }));
+  await wait(80);
+  const st = last(c, "start");
+  ok(st && st.cfg && st.cfg.size === 6, "host start broadcast with cfg to peers");
+  const sc0 = last(c, "score");
+  ok(sc0 && sc0.BL === 0 && sc0.GR === 0, "score reset on start");
+
+  // 对局进行中 F1 抢房主应被拒绝（roomState=playing）：c 发 grabhost 无 host 广播
+  c.send(JSON.stringify({ t: "grabhost" }));
+  await wait(80);
+  ok(!last(c, "host"), "grabhost rejected during playing");
+
+  // 对局进行中新连入：welcome.state==="playing"（客户端据此停留大厅）
+  const d = await open();
+  await wait(80);
+  const wd = d.msgs.find((m) => m.t === "welcome");
+  ok(wd && wd.state === "playing", "mid-match joiner sees playing state");
+
+  // kill 扩展字段转发：killerName/killerTeam/victimName/victimTeam/w/hs 原样广播
+  b.send(JSON.stringify({ t: "kill", killer: 2, victim: 1, team: "GR",
+    killerName: "玩家2", killerTeam: "GR", victimName: "玩家1", victimTeam: "BL", w: "awp", hs: true }));
+  await wait(80);
+  const kf2 = last(c, "kill");
+  ok(kf2 && kf2.killerName === "玩家2" && kf2.victimTeam === "BL" && kf2.w === "awp" && kf2.hs === true,
+    "kill relay carries extended fields");
+
+  // 房主结束回大厅：end → 全员 roomState 回 lobby
+  b.send(JSON.stringify({ t: "end" }));
+  await wait(80);
+  ok(last(c, "end"), "host end broadcast");
+  const e = await open();
+  await wait(80);
+  const we = e.msgs.find((m) => m.t === "welcome");
+  ok(we && we.state === "lobby", "after end, new joiner sees lobby state");
+
+  // F1 抢房主：c(slot1) 发 grabhost → 全体收到 host{slot:1}，旧房主 b 被降级
+  c.send(JSON.stringify({ t: "grabhost" }));
+  await wait(80);
+  const hc = last(c, "host");
+  ok(hc && hc.slot === 1, "grabhost promotes sender (host slot=1 broadcast)");
+  const hb = last(b, "host");
+  ok(hb && hb.slot === 1, "old host sees host slot=1 (demoted)");
+  // 抢房主后 c 可改配置、b 不能
+  c.send(JSON.stringify({ t: "config", cfg: { goal: 30 } }));
+  b.send(JSON.stringify({ t: "config", cfg: { goal: 999 } }));
+  await wait(80);
+  const cfgAfter = last(e, "config");
+  ok(cfgAfter && cfgAfter.cfg.goal === 30, "new host config applies, old host ignored");
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();
