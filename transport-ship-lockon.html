@@ -5444,10 +5444,25 @@ netUpdate(t) {
     this.netAcc += t;
     if (this.netAcc >= .05) {
         this.netAcc = 0;
+        // 优化：只发「变化过」的实体（静止/死亡的 bot 不再每 tick 重发），并每 ~1s 发一次全量关键帧
+        // （给新热加入者做初始状态 + 漂移校正）。功能不变，大幅削减中继与客户端负载。
+        this._kf = (this._kf || 0) + 1;
+        let keyframe = this._kf % 20 === 0;
         let ents = [];
-        for (let a of mine) if (a.netId != null) ents.push(this.netSnap(a));
+        for (let a of mine) if (a.netId != null) {
+            let sn = this.netSnap(a);
+            if (keyframe || this._snapDiff(a._ps, sn)) { ents.push(sn); a._ps = sn; }
+        }
         if (ents.length) this.netSend({ t: "state", ents });
     }
+}
+_snapDiff(p, s) {
+    if (!p) return true;
+    if (p.al !== s.al || p.hp !== s.hp || p.w !== s.w || p.cr !== s.cr || p.og !== s.og || p.tm !== s.tm) return true;
+    let dx = p.x - s.x, dy = p.y - s.y, dz = p.z - s.z;
+    if (dx * dx + dy * dy + dz * dz > 9e-4) return true; // 位移 > ~0.03m
+    let da = p.yaw - s.yaw, db = p.pitch - s.pitch;
+    return da * da + db * db > 1e-4; // 转向 > ~0.01rad
 }
 applyNetState(m) {
     if (!m.ents || !this.playing) return;
@@ -5471,7 +5486,10 @@ applyNetState(m) {
 addRemote(s) {
     if (!this.playing) return null;
     let av;
-    try { av = new Fa(this, { id: 900 + (s.id % 100), name: s.nm || ("玩家" + s.id), team: s.tm || "GR", diff: "normal" }); }
+    // 本地 Fa.id 用单调自增（5000+），与 netId 解耦——避免「真人 netId」与「host bot netId=1000+id」
+    // 取模后撞成同一个 Fa.id（3+ 人/多 bot 时会重叠），路由始终用 netId + remotes 表。
+    this._rseq = (this._rseq || 0) + 1;
+    try { av = new Fa(this, { id: 5000 + this._rseq, name: s.nm || ("玩家" + s.id), team: s.tm || "GR", diff: "normal" }); }
     catch (e) { return null; }
     av.isRemote = !0; av.netId = s.id;
     av.pos.set(s.x, s.y != null ? s.y : .02, s.z); av.yaw = s.yaw || 0; av.pitch = s.pitch || 0;
@@ -5650,17 +5668,9 @@ renderLobby() {
     actEl.innerHTML = "";
     let btn = (txt, cb) => { let e = document.createElement("button"); e.textContent = txt; e.style.cssText = "padding:10px 20px;border-radius:8px;border:none;background:#4a90d9;color:#fff;font-weight:700;cursor:pointer;font-size:15px"; e.addEventListener("click", cb); actEl.appendChild(e); };
     let note = t => { let e = document.createElement("span"); e.textContent = t; e.style.color = "#8fa6bd"; actEl.appendChild(e); };
-    if (this.pendingStart) btn("点击进入战场", () => this.netEnterMatch());
-    else if (this.roomState === "playing") note("对局进行中，等待下一局…");
+    if (this.roomState === "playing") btn("加入战场", () => this.netEnterMatch()); // 热加入：对局进行中也可直接进入
     else if (host) btn("开始对局", () => this.netStartHost());
     else note("等待房主开始…");
-    if (host && this.roomState === "playing") { // 房主在大厅可直接终止前面已开始的对局→全体回大厅
-        let e = document.createElement("button");
-        e.textContent = "终止对局";
-        e.style.cssText = "padding:10px 20px;border-radius:8px;border:none;background:#c0392b;color:#fff;font-weight:700;cursor:pointer;font-size:15px";
-        e.addEventListener("click", () => { this.netEndMatch(); this.renderLobby(); });
-        actEl.appendChild(e);
-    }
     let back = document.createElement("button");
     back.textContent = "退出联机";
     back.style.cssText = "padding:10px 16px;border-radius:8px;border:1px solid #2a3b4d;background:#16212e;color:#cbd6e2;cursor:pointer";
